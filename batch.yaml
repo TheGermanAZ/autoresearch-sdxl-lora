@@ -1,0 +1,22 @@
+# Parallel experiment batch.
+# Each entry overrides config.yaml defaults. Only specify what changes.
+# All experiments run simultaneously on separate A100 GPUs.
+#
+# Usage: modal run train.py --batch
+
+experiments:
+  - tag: rank8
+    rank: 8
+    alpha: 8
+
+  - tag: rank16
+    rank: 16
+    alpha: 16
+
+  - tag: rank32
+    rank: 32
+    alpha: 32
+
+  - tag: rank64
+    rank: 64
+    alpha: 64
