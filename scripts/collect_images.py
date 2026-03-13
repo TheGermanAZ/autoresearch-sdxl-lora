@@ -25,7 +25,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from urllib.request import urlretrieve, Request, urlopen
+from urllib.request import Request, urlopen
 
 from PIL import Image
 
@@ -41,7 +41,7 @@ def download_from_urls(url_file: Path, output_dir: Path) -> list[Path]:
         dest = output_dir / f"img_{i:04d}{ext}"
         try:
             req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urlopen(req) as resp, open(dest, "wb") as f:
+            with urlopen(req, timeout=30) as resp, open(dest, "wb") as f:
                 f.write(resp.read())
             downloaded.append(dest)
             print(f"  [{i+1}/{len(urls)}] {dest.name}")

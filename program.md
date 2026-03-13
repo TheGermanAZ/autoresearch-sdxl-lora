@@ -26,8 +26,7 @@ This is **3-5x faster** than testing one config at a time.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| rank | int | LoRA rank (4–128). Controls adapter capacity. |
-| alpha | int | LoRA alpha. Usually equals rank. |
+| rank | int | LoRA rank (4–128). Controls adapter capacity. Alpha is hardcoded to equal rank. |
 | lr | float | Learning rate for optimizer. |
 | train_batch_size | int | Training batch size. |
 | gradient_accumulation_steps | int | Effective batch = batch_size × this. |
@@ -47,13 +46,10 @@ Every entry MUST have a unique `tag`.
 experiments:
   - tag: rank8
     rank: 8
-    alpha: 8
   - tag: rank16
     rank: 16
-    alpha: 16
   - tag: rank32
     rank: 32
-    alpha: 32
 ```
 
 ## Setup (one-time, before the loop)
@@ -143,7 +139,6 @@ LOOP FOREVER:
 experiments:
   - tag: rank32           # test higher capacity
     rank: 32
-    alpha: 32
   - tag: lr_half          # test lower learning rate
     lr: 5e-5
   - tag: steps_1500       # test more training
@@ -179,12 +174,12 @@ BATCH RESULTS — 4 experiments
 
 ──────────────────────────────────────────────────────────────────────
 BEST: [steps_1500] clip_sim_centroid=0.871000
-  rank=16, alpha=16, lr=0.0001, steps=1500
+  rank=16, lr=0.0001, steps=1500
 ──────────────────────────────────────────────────────────────────────
 
 best_tag: steps_1500
 best_clip_centroid: 0.871000
-best_config: {"rank": 16, "alpha": 16, "lr": 0.0001, "max_train_steps": 1500, ...}
+best_config: {"rank": 16, "lr": 0.0001, "max_train_steps": 1500, ...}
 ```
 
 ## results.tsv Schema
@@ -217,7 +212,7 @@ Once the loop begins, do NOT pause to ask the human if you should continue. Do N
 
 - **Batch 1 (broad sweep):** Rank (8, 16, 32, 64) — find the right capacity.
 - **Batch 2 (refine winner + explore):** Refine best rank ± neighbors, try different LR, try more steps.
-- **Batch 3-4:** Explore LR scheduler, warmup, alpha ratio around the winning config.
+- **Batch 3-4:** Explore LR scheduler, warmup, gradient accumulation around the winning config.
 - **Batch 5+:** Caption strategies, guidance scale, combinations. Captions are often the biggest lever.
 - **Later batches:** Fine-grained refinement around the best known config.
 

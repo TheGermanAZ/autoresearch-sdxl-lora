@@ -20,7 +20,7 @@ import modal
 MINUTES = 60
 
 volume = modal.Volume.from_name("sdxl-lora-experiments", create_if_missing=True)
-OUTPUT_DIR = "/outputs"
+VOL_DIR = "/vol"
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
@@ -147,7 +147,7 @@ def build_prompt_list(count: int) -> list[str]:
 
 @app.function(
     gpu="A100-80GB",
-    volumes={OUTPUT_DIR: volume},
+    volumes={VOL_DIR: volume},
     timeout=60 * MINUTES,
     secrets=[modal.Secret.from_name("huggingface-secret")],
 )
@@ -196,18 +196,28 @@ def generate_batch(prompts: list[str], start_idx: int, output_dir: str, negative
 @app.local_entrypoint()
 def main(count: int = 100, output_dir: str = "dataset/cyber-renaissance", batch_size: int = 10):
     prompts = build_prompt_list(count)
-    remote_dir = f"{OUTPUT_DIR}/{output_dir}"
+    remote_dir = f"{VOL_DIR}/{output_dir}"
 
     print(f"Generating {len(prompts)} cyber renaissance images...")
     print(f"Output: {remote_dir}")
-    print(f"Batch size: {batch_size}\n")
+    print(f"Batch size: {batch_size}")
 
-    total = 0
+    # Build parallel batch args
+    batch_prompts = []
+    batch_starts = []
+    batch_dirs = []
+    batch_negs = []
     for i in range(0, len(prompts), batch_size):
-        batch = prompts[i : i + batch_size]
-        print(f"Batch {i // batch_size + 1}/{(len(prompts) + batch_size - 1) // batch_size} ({len(batch)} images)...")
-        n = generate_batch.remote(batch, i, remote_dir, NEGATIVE_PROMPT)
-        total += n
+        batch_prompts.append(prompts[i : i + batch_size])
+        batch_starts.append(i)
+        batch_dirs.append(remote_dir)
+        batch_negs.append(NEGATIVE_PROMPT)
+
+    print(f"Launching {len(batch_prompts)} batches in parallel on separate GPUs...\n")
+
+    # Fan out to parallel GPUs
+    results = list(generate_batch.map(batch_prompts, batch_starts, batch_dirs, batch_negs))
+    total = sum(results)
 
     print(f"\nDone! {total} images generated on Modal volume.")
     print(f"Download with: modal volume get sdxl-lora-experiments {output_dir} data/cyber-renaissance")

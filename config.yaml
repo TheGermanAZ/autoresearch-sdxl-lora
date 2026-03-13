@@ -1,5 +1,5 @@
 rank: 16
-alpha: 16
+# Note: alpha is hardcoded to equal rank in the Diffusers SDXL LoRA script
 lr: 0.0001
 train_batch_size: 1
 gradient_accumulation_steps: 4

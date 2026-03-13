@@ -60,16 +60,20 @@ def compute_embeddings(image_bytes_list: list[bytes], filenames: list[str], capt
     os.makedirs(ref_dir, exist_ok=True)
     os.makedirs(train_data_dir, exist_ok=True)
 
-    # Save images to volume as training data
+    import json as json_mod
+
+    # Save images to volume as training data + metadata.jsonl for Diffusers
+    metadata_entries = []
     for img_bytes, filename in zip(image_bytes_list, filenames):
         img_path = f"{train_data_dir}/{filename}"
         with open(img_path, "wb") as f:
             f.write(img_bytes)
+        metadata_entries.append({"file_name": filename, "text": caption_prefix})
 
-        # Write caption .txt file alongside each image
-        txt_path = os.path.splitext(img_path)[0] + ".txt"
-        with open(txt_path, "w") as f:
-            f.write(caption_prefix + "\n")
+    # Write metadata.jsonl — this is what Diffusers --train_data_dir reads
+    with open(f"{train_data_dir}/metadata.jsonl", "w") as f:
+        for entry in metadata_entries:
+            f.write(json_mod.dumps(entry) + "\n")
 
     # Compute CLIP embeddings
     print("Loading CLIP model...")

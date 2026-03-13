@@ -68,7 +68,11 @@ image = (
     )
 )
 
-app = modal.App("sdxl-autoresearch", image=image)
+app = modal.App(
+    "sdxl-autoresearch",
+    image=image,
+    mounts=[modal.Mount.from_local_file("score.py", remote_path="/root/score.py")],
+)
 
 # ---------------------------------------------------------------------------
 # Fixed model config
@@ -137,6 +141,8 @@ def run_experiment(config: dict, eval_prompts: list[str], exp_tag: str = "curren
         f"--seed={SEED}",
         f"--output_dir={output_dir}",
         f"--rank={config.get('rank', 16)}",
+        # Note: alpha is hardcoded to equal rank in the Diffusers SDXL LoRA script.
+        # To use alpha != rank, you would need to fork the training script.
         "--mixed_precision=bf16",
         "--gradient_checkpointing",
         f"--validation_prompt=a painting in the style of {trigger}, a renaissance portrait with neon accents",
@@ -152,9 +158,12 @@ def run_experiment(config: dict, eval_prompts: list[str], exp_tag: str = "curren
         ])
     else:
         train_data_dir = f"{VOL_DIR}/autoresearch/train_data"
-        cmd.extend([f"--train_data_dir={train_data_dir}"])
+        cmd.extend([
+            f"--train_data_dir={train_data_dir}",
+            "--caption_column=text",
+        ])
 
-    print(f"Config: rank={config.get('rank')}, alpha={config.get('alpha')}, lr={config['lr']}, steps={config.get('max_train_steps')}")
+    print(f"Config: rank={config.get('rank')}, lr={config['lr']}, steps={config.get('max_train_steps')}")
 
     process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     with process.stdout as pipe:
@@ -179,21 +188,32 @@ def run_experiment(config: dict, eval_prompts: list[str], exp_tag: str = "curren
     ).to("cuda")
     pipe.load_lora_weights(output_dir)
 
-    # Clean pipe for negative control (no LoRA)
-    pipe_clean = DiffusionPipeline.from_pretrained(
-        MODEL_NAME, torch_dtype=torch.bfloat16, use_safetensors=True,
-    ).to("cuda")
-
     prompts = [p.replace("{trigger}", trigger) for p in eval_prompts]
     image_paths = []
 
-    for pi, prompt in enumerate(prompts):
-        use_lora = pi < NUM_TRIGGER_PROMPTS
-        active_pipe = pipe if use_lora else pipe_clean
-
+    # Generate LoRA images (trigger prompts)
+    for pi, prompt in enumerate(prompts[:NUM_TRIGGER_PROMPTS]):
         for seed in EVAL_SEEDS:
             generator = torch.Generator(device="cuda").manual_seed(seed)
-            img = active_pipe(
+            img = pipe(
+                prompt,
+                num_inference_steps=EVAL_STEPS,
+                guidance_scale=config.get("guidance", 7.5),
+                width=RESOLUTION, height=RESOLUTION,
+                generator=generator,
+            ).images[0]
+
+            img_path = f"{eval_dir}/p{pi}_s{seed}.png"
+            img.save(img_path)
+            image_paths.append((pi, seed, img_path))
+
+    # Unload LoRA for negative control images (saves ~6.5GB VRAM vs loading a second pipeline)
+    pipe.unload_lora_weights()
+
+    for pi, prompt in enumerate(prompts[NUM_TRIGGER_PROMPTS:], start=NUM_TRIGGER_PROMPTS):
+        for seed in EVAL_SEEDS:
+            generator = torch.Generator(device="cuda").manual_seed(seed)
+            img = pipe(
                 prompt,
                 num_inference_steps=EVAL_STEPS,
                 guidance_scale=config.get("guidance", 7.5),
@@ -209,7 +229,7 @@ def run_experiment(config: dict, eval_prompts: list[str], exp_tag: str = "curren
     print(f"[{exp_tag}] Generated {len(image_paths)} images ({eval_seconds:.1f}s)")
 
     # Free VRAM
-    del pipe, pipe_clean
+    del pipe
     torch.cuda.empty_cache()
 
     # --- CLIP SCORING ---
@@ -269,7 +289,9 @@ def run_experiment(config: dict, eval_prompts: list[str], exp_tag: str = "curren
     if scores["neg_control"] > NEG_WARN_THRESHOLD:
         print(f"WARNING: neg_control ({scores['neg_control']:.3f}) > {NEG_WARN_THRESHOLD} — possible overfitting")
 
-    volume.commit()
+    # Note: volume.commit() is NOT called here. When running parallel experiments
+    # via .map(), concurrent commits can overwrite each other's snapshots.
+    # Modal auto-persists writes to the volume when the function completes.
 
     return {
         "status": "ok",
@@ -308,10 +330,8 @@ def main(dry_run: bool = False, batch: bool = False, dataset_name: str = ""):
             print("  experiments:")
             print("    - tag: rank8")
             print("      rank: 8")
-            print("      alpha: 8")
             print("    - tag: rank32")
             print("      rank: 32")
-            print("      alpha: 32")
             sys.exit(1)
 
         batch_config = yaml.safe_load(batch_path.read_text())
@@ -326,15 +346,15 @@ def main(dry_run: bool = False, batch: bool = False, dataset_name: str = ""):
         configs = []
         tags = []
         for exp in experiments:
-            tag = exp.pop("tag", f"exp_{len(configs)}")
-            merged = {**base_config, **exp}
+            tag = exp.get("tag", f"exp_{len(configs)}")
+            merged = {**base_config, **{k: v for k, v in exp.items() if k != "tag"}}
             configs.append(merged)
             tags.append(tag)
 
         if dry_run:
             print(f"DRY RUN — {len(configs)} parallel experiments:\n")
             for tag, config in zip(tags, configs):
-                print(f"  [{tag}] rank={config.get('rank')}, alpha={config.get('alpha')}, lr={config.get('lr')}, steps={config.get('max_train_steps')}")
+                print(f"  [{tag}] rank={config.get('rank')}, lr={config.get('lr')}, steps={config.get('max_train_steps')}")
             sys.exit(0)
 
         print(f"Launching {len(configs)} experiments in parallel...")
@@ -371,7 +391,7 @@ def main(dry_run: bool = False, batch: bool = False, dataset_name: str = ""):
             print(f"\n{'─'*70}")
             print(f"BEST: [{best['exp_tag']}] clip_sim_centroid={best['clip_sim_centroid']:.6f}")
             cfg = best.get("config", {})
-            print(f"  rank={cfg.get('rank')}, alpha={cfg.get('alpha')}, lr={cfg.get('lr')}, steps={cfg.get('max_train_steps')}")
+            print(f"  rank={cfg.get('rank')}, lr={cfg.get('lr')}, steps={cfg.get('max_train_steps')}")
             print(f"{'─'*70}")
 
             # Output JSON for LLM to parse
