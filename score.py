@@ -192,10 +192,10 @@ Respond with ONLY three numbers separated by commas, nothing else. Example: 7,8,
 
 
 def vlm_judge(image_path: Path, api_key: str = None) -> dict:
-    """Score image using Claude vision API. Returns per-criterion scores.
+    """Score image using Gemini 1.5 Pro via OpenRouter. Returns per-criterion scores.
 
-    Requires ANTHROPIC_API_KEY environment variable or api_key parameter.
-    Cost: ~$0.01-0.03 per image.
+    Requires OPENROUTER_API_KEY environment variable or api_key parameter.
+    Cost: ~$0.002-0.005 per image (much cheaper than Claude vision).
     """
     import base64
     import os
@@ -203,11 +203,10 @@ def vlm_judge(image_path: Path, api_key: str = None) -> dict:
     import re
     from urllib.request import Request, urlopen
 
-    key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
+    key = api_key or os.environ.get("OPENROUTER_API_KEY", "")
     if not key:
         return {"style_fusion": 0.0, "technical": 0.0, "aesthetic": 0.0, "vlm_avg": 0.0}
 
-    # Encode image as base64
     with open(image_path, "rb") as f:
         img_b64 = base64.b64encode(f.read()).decode()
 
@@ -215,31 +214,30 @@ def vlm_judge(image_path: Path, api_key: str = None) -> dict:
     media_type = "image/png" if suffix.endswith(".png") else "image/jpeg"
 
     payload = json.dumps({
-        "model": "claude-sonnet-4-20250514",
+        "model": "google/gemini-pro-1.5",
         "max_tokens": 50,
         "messages": [{
             "role": "user",
             "content": [
-                {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": img_b64}},
+                {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{img_b64}"}},
                 {"type": "text", "text": VLM_JUDGE_RUBRIC},
             ],
         }],
     })
 
     req = Request(
-        "https://api.anthropic.com/v1/messages",
+        "https://openrouter.ai/api/v1/chat/completions",
         data=payload.encode(),
         headers={
             "Content-Type": "application/json",
-            "x-api-key": key,
-            "anthropic-version": "2023-06-01",
+            "Authorization": f"Bearer {key}",
         },
     )
 
     try:
-        with urlopen(req, timeout=30) as resp:
+        with urlopen(req, timeout=60) as resp:
             result = json.loads(resp.read())
-        text = result["content"][0]["text"].strip()
+        text = result["choices"][0]["message"]["content"].strip()
         nums = re.findall(r"(\d+)", text)
         if len(nums) >= 3:
             style = float(nums[0]) / 10.0

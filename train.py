@@ -17,6 +17,7 @@ Usage:
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -34,7 +35,9 @@ EVAL_SEEDS = [42, 137, 256, 999]
 EVAL_STEPS = 30
 NUM_TRIGGER_PROMPTS = 5  # Prompts 1-5 (with trigger)
 NUM_NEG_PROMPTS = 1  # Prompt 6 (negative control, no LoRA influence)
+EXPECTED_EVAL_PROMPTS = NUM_TRIGGER_PROMPTS + NUM_NEG_PROMPTS
 NEG_WARN_THRESHOLD = 0.45
+SUPPORTED_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 
 # ---------------------------------------------------------------------------
 # Modal setup
@@ -84,6 +87,102 @@ SEED = 42
 SCREEN_STEPS = 50  # Steps for cheap screening tier
 
 
+def build_caption_prefix(config: dict) -> str:
+    trigger = config.get("trigger_word", "cybrn")
+    template = config.get("caption_template", "a painting in the style of {trigger}, ")
+    return template.replace("{trigger}", trigger)
+
+
+def materialize_training_data(train_data_dir: str, config: dict, dataset_name: str = "") -> str:
+    """Build a local train_data_dir so caption overrides apply per experiment."""
+    import io
+
+    from PIL import Image
+
+    target_dir = Path(train_data_dir)
+    shutil.rmtree(target_dir, ignore_errors=True)
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    image_filenames = []
+
+    if dataset_name:
+        from datasets import load_dataset
+
+        dataset = load_dataset(dataset_name, split="train")
+        if len(dataset) == 0:
+            raise ValueError(f"Dataset '{dataset_name}' is empty")
+        if "image" not in dataset.column_names:
+            raise ValueError(
+                f"Dataset '{dataset_name}' must expose an 'image' column, found: {dataset.column_names}"
+            )
+
+        for idx, example in enumerate(dataset):
+            image_obj = example["image"]
+            if isinstance(image_obj, Image.Image):
+                image = image_obj.convert("RGB")
+            elif isinstance(image_obj, dict) and image_obj.get("bytes") is not None:
+                image = Image.open(io.BytesIO(image_obj["bytes"])).convert("RGB")
+            elif isinstance(image_obj, (str, os.PathLike)):
+                image = Image.open(image_obj).convert("RGB")
+            else:
+                raise ValueError(f"Unsupported image payload type for dataset '{dataset_name}': {type(image_obj)!r}")
+
+            filename = f"{idx:05d}.png"
+            image.save(target_dir / filename)
+            image_filenames.append(filename)
+    else:
+        source_dir = Path(f"{VOL_DIR}/autoresearch/train_data")
+        if not source_dir.exists():
+            raise ValueError(
+                f"Training data directory not found: {source_dir}. Run 'modal run prepare.py --images <dir>' first."
+            )
+
+        for src_path in sorted(source_dir.iterdir()):
+            if (
+                not src_path.is_file()
+                or src_path.name == "metadata.jsonl"
+                or src_path.suffix.lower() not in SUPPORTED_IMAGE_SUFFIXES
+            ):
+                continue
+            os.symlink(src_path, target_dir / src_path.name)
+            image_filenames.append(src_path.name)
+
+    if not image_filenames:
+        raise ValueError("No training images found to materialize")
+
+    caption_prefix = build_caption_prefix(config)
+    metadata_path = target_dir / "metadata.jsonl"
+    with metadata_path.open("w") as f:
+        for filename in image_filenames:
+            f.write(json.dumps({"file_name": filename, "text": caption_prefix}) + "\n")
+
+    return str(target_dir)
+
+
+def merge_experiment_configs(base_config: dict, experiments: list[dict], default_tag_prefix: str) -> tuple[list[dict], list[str]]:
+    """Merge batch overrides and reject duplicate tags before launching work."""
+    configs = []
+    tags = []
+    seen_tags = set()
+
+    for idx, exp in enumerate(experiments):
+        if not isinstance(exp, dict):
+            raise ValueError(f"Experiment #{idx + 1} must be a YAML mapping, got {type(exp).__name__}")
+
+        tag = exp.get("tag", f"{default_tag_prefix}_{idx}")
+        if not tag:
+            raise ValueError(f"Experiment #{idx + 1} has an empty tag")
+        if tag in seen_tags:
+            raise ValueError(f"Duplicate experiment tag '{tag}' in batch.yaml; tags must be unique")
+
+        merged = {**base_config, **{k: v for k, v in exp.items() if k != "tag"}}
+        configs.append(merged)
+        tags.append(tag)
+        seen_tags.add(tag)
+
+    return configs, tags
+
+
 @app.function(
     gpu="A100-80GB",
     volumes={VOL_DIR: volume},
@@ -108,7 +207,16 @@ def screen_experiment(config: dict, exp_tag: str = "screen", dataset_name: str =
     write_basic_config(mixed_precision="bf16")
     t_start = time.time()
 
-    trigger = config.get("trigger_word", "cybrn")
+    try:
+        train_data_dir = materialize_training_data(f"{output_dir}/train_data", config, dataset_name)
+    except Exception as e:
+        return {
+            "status": "crash",
+            "error": f"train_data_failed: {e}",
+            "training_seconds": time.time() - t_start,
+            "exp_tag": exp_tag,
+            "config": config,
+        }
 
     # Override steps to SCREEN_STEPS, disable validation (no image gen)
     cmd = [
@@ -132,13 +240,12 @@ def screen_experiment(config: dict, exp_tag: str = "screen", dataset_name: str =
         "--report_to=tensorboard",
     ]
 
-    if dataset_name:
-        cmd.extend([f"--dataset_name={dataset_name}", "--caption_column=text"])
-    else:
-        cmd.extend([f"--train_data_dir={VOL_DIR}/autoresearch/train_data", "--caption_column=text"])
+    cmd.extend([f"--train_data_dir={train_data_dir}", "--caption_column=text"])
 
     print(f"=== [{exp_tag}] SCREENING ({SCREEN_STEPS} steps) ===", flush=True)
-    print(f"Config: rank={config.get('rank')}, lr={config['lr']}")
+    print(
+        f"Config: rank={config.get('rank')}, lr={config['lr']}, caption='{build_caption_prefix(config)}'"
+    )
 
     # Capture output to parse loss values
     losses = []
@@ -201,6 +308,7 @@ def screen_experiment(config: dict, exp_tag: str = "screen", dataset_name: str =
     timeout=60 * MINUTES,
     secrets=[
         modal.Secret.from_name("huggingface-secret"),
+        modal.Secret.from_name("openrouter-secret", required_keys=["OPENROUTER_API_KEY"]),
     ],
 )
 def run_experiment(config: dict, eval_prompts: list[str], exp_tag: str = "current", dataset_name: str = ""):
@@ -237,7 +345,12 @@ def run_experiment(config: dict, eval_prompts: list[str], exp_tag: str = "curren
     t_train_start = time.time()
 
     trigger = config.get("trigger_word", "cybrn")
-    caption_prefix = config.get("caption_template", "a painting in the style of {trigger}, ").replace("{trigger}", trigger)
+    caption_prefix = build_caption_prefix(config)
+
+    try:
+        train_data_dir = materialize_training_data(f"{output_dir}/train_data", config, dataset_name)
+    except Exception as e:
+        return {"status": "crash", "error": f"train_data_failed: {e}", "exp_tag": exp_tag, "config": config}
 
     cmd = [
         "accelerate", "launch",
@@ -264,20 +377,16 @@ def run_experiment(config: dict, eval_prompts: list[str], exp_tag: str = "curren
         "--report_to=tensorboard",
     ]
 
-    # Dataset source: HF dataset or local data dir on volume
-    if dataset_name:
-        cmd.extend([
-            f"--dataset_name={dataset_name}",
-            "--caption_column=text",
-        ])
-    else:
-        train_data_dir = f"{VOL_DIR}/autoresearch/train_data"
-        cmd.extend([
-            f"--train_data_dir={train_data_dir}",
-            "--caption_column=text",
-        ])
+    # Materialized local data makes caption overrides apply consistently.
+    cmd.extend([
+        f"--train_data_dir={train_data_dir}",
+        "--caption_column=text",
+    ])
 
-    print(f"Config: rank={config.get('rank')}, lr={config['lr']}, steps={config.get('max_train_steps')}")
+    print(
+        f"Config: rank={config.get('rank')}, lr={config['lr']}, steps={config.get('max_train_steps')}, "
+        f"caption='{caption_prefix}'"
+    )
 
     process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     with process.stdout as pipe:
@@ -458,7 +567,15 @@ def run_experiment(config: dict, eval_prompts: list[str], exp_tag: str = "curren
 def load_eval_prompts(project_dir: Path) -> list[str]:
     """Load eval prompts from file."""
     prompts_path = project_dir / "eval_prompts.txt"
-    return [line.strip() for line in prompts_path.read_text().splitlines() if line.strip()]
+    prompts = [line.strip() for line in prompts_path.read_text().splitlines() if line.strip()]
+
+    if len(prompts) != EXPECTED_EVAL_PROMPTS:
+        raise ValueError(
+            f"{prompts_path} must contain exactly {EXPECTED_EVAL_PROMPTS} prompts "
+            f"({NUM_TRIGGER_PROMPTS} trigger + {NUM_NEG_PROMPTS} negative control), found {len(prompts)}"
+        )
+
+    return prompts
 
 
 @app.local_entrypoint()
@@ -484,13 +601,7 @@ def main(dry_run: bool = False, batch: bool = False, screen: bool = False, datas
         base_config = yaml.safe_load((project_dir / "config.yaml").read_text())
         experiments = batch_config.get("experiments", [])
 
-        configs = []
-        tags = []
-        for exp in experiments:
-            tag = exp.get("tag", f"screen_{len(configs)}")
-            merged = {**base_config, **{k: v for k, v in exp.items() if k != "tag"}}
-            configs.append(merged)
-            tags.append(tag)
+        configs, tags = merge_experiment_configs(base_config, experiments, "screen")
 
         if dry_run:
             print(f"DRY RUN — screening {len(configs)} configs ({SCREEN_STEPS} steps each):\n")
@@ -560,14 +671,7 @@ def main(dry_run: bool = False, batch: bool = False, screen: bool = False, datas
             print("ERROR: batch.yaml has no experiments")
             sys.exit(1)
 
-        # Merge each experiment's overrides with the base config
-        configs = []
-        tags = []
-        for exp in experiments:
-            tag = exp.get("tag", f"exp_{len(configs)}")
-            merged = {**base_config, **{k: v for k, v in exp.items() if k != "tag"}}
-            configs.append(merged)
-            tags.append(tag)
+        configs, tags = merge_experiment_configs(base_config, experiments, "exp")
 
         if dry_run:
             print(f"DRY RUN — {len(configs)} parallel experiments:\n")
