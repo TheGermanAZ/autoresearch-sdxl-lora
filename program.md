@@ -192,6 +192,34 @@ i7j8k9l	0.845	0.818	0.022	0.310	63.5	910	discard	batch1: lr_half
 m1n2o3p	0.871	0.840	0.012	0.312	63.5	1380	keep	batch2: steps_1500 (winner)
 ```
 
+## Two-Tier Evaluation
+
+Use **screen mode** to cheaply filter configs before expensive full runs.
+
+**Tier 1 — Screen (50 steps, ~5 min, loss only):**
+```bash
+modal run train.py --screen > screen.log 2>&1
+```
+Reads batch.yaml, trains each config for only 50 steps, reports loss trajectory. No image generation, no CLIP scoring. Use this to discard obviously bad configs.
+
+**Tier 2 — Full batch (500 steps, ~40 min, CLIP scored):**
+```bash
+modal run train.py --batch > run.log 2>&1
+```
+Runs the top candidates from screening through the full pipeline.
+
+**Two-tier loop pattern:**
+```
+1. Write batch.yaml with 6-8 diverse configs
+2. Screen all: modal run train.py --screen > screen.log 2>&1
+3. Read screen_ranking from screen.log
+4. Rewrite batch.yaml with only the top 3-4 configs
+5. Full run: modal run train.py --batch > run.log 2>&1
+6. Read CLIP results, keep best, loop
+```
+
+This lets you explore 6-8 configs per cycle while only paying full GPU time for 3-4.
+
 ## Fallback to Single Mode
 
 If you want to test ONE specific hypothesis (e.g., verify a fix after a crash), use single mode:
@@ -220,11 +248,17 @@ Adapt based on results. If rank barely matters but LR is highly sensitive, spend
 
 ## Cadence
 
-~15-20 min per batch (all experiments run in parallel). ~3-4 batches/hour. Each batch tests 3-5 configs. **~12-20 experiments/hour.**
+**With two-tier evaluation:**
+- Screen: ~5 min for 6-8 configs in parallel
+- Full batch: ~40 min for 3-4 configs at 500 steps
+- Total cycle: ~45 min, testing 6-8 configs, validating top 3-4
+- **~10-12 validated experiments/hour, ~80-100 overnight**
 
-~100-150 experiments overnight (8 hours).
+**Without screening (batch only):**
+- ~40 min per batch at 500 steps. ~6-8 experiments/hour.
 
 ## Cost
 
 ~$3.74/hr per A100. With 4 parallel GPUs: ~$15/hr during batch execution.
-Overnight (8 hours, ~70% GPU utilization): ~$80-100.
+Screen tier uses the same GPUs but for ~5 min instead of ~40 min, so screening is ~$1-2 per round.
+Overnight (8 hours): ~$60-80.

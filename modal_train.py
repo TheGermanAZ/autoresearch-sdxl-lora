@@ -48,7 +48,7 @@ image = (
     )
     .env({"HF_HUB_CACHE": "/cache", "HF_XET_HIGH_PERFORMANCE": "1"})
     .run_commands(
-        "git clone --depth 1 https://github.com/huggingface/diffusers.git /diffusers_repo"
+        "git clone --depth 1 --branch v0.31.0 https://github.com/huggingface/diffusers.git /diffusers_repo"
     )
 )
 

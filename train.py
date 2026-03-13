@@ -64,15 +64,12 @@ image = (
     )
     .env({"HF_HUB_CACHE": "/cache", "HF_XET_HIGH_PERFORMANCE": "1"})
     .run_commands(
-        "git clone --depth 1 https://github.com/huggingface/diffusers.git /diffusers_repo"
+        "git clone --depth 1 --branch v0.31.0 https://github.com/huggingface/diffusers.git /diffusers_repo"
     )
+    .add_local_file("score.py", "/root/score.py")
 )
 
-app = modal.App(
-    "sdxl-autoresearch",
-    image=image,
-    mounts=[modal.Mount.from_local_file("score.py", remote_path="/root/score.py")],
-)
+app = modal.App("sdxl-autoresearch", image=image)
 
 # ---------------------------------------------------------------------------
 # Fixed model config
@@ -82,6 +79,120 @@ MODEL_NAME = "stabilityai/stable-diffusion-xl-base-1.0"
 VAE_NAME = "madebyollin/sdxl-vae-fp16-fix"
 RESOLUTION = 1024
 SEED = 42
+
+
+SCREEN_STEPS = 50  # Steps for cheap screening tier
+
+
+@app.function(
+    gpu="A100-80GB",
+    volumes={VOL_DIR: volume},
+    timeout=15 * MINUTES,
+    secrets=[
+        modal.Secret.from_name("huggingface-secret"),
+    ],
+)
+def screen_experiment(config: dict, exp_tag: str = "screen", dataset_name: str = ""):
+    """Cheap screening tier: train 50 steps, report loss trajectory only.
+
+    No image generation, no CLIP scoring. ~5 min per run.
+    Used to filter out bad configs before expensive full evaluation.
+    """
+    import re
+    import torch
+    from accelerate.utils import write_basic_config
+
+    output_dir = f"{VOL_DIR}/autoresearch/runs/{exp_tag}"
+    os.makedirs(output_dir, exist_ok=True)
+
+    write_basic_config(mixed_precision="bf16")
+    t_start = time.time()
+
+    trigger = config.get("trigger_word", "cybrn")
+
+    # Override steps to SCREEN_STEPS, disable validation (no image gen)
+    cmd = [
+        "accelerate", "launch",
+        "/diffusers_repo/examples/text_to_image/train_text_to_image_lora_sdxl.py",
+        f"--pretrained_model_name_or_path={MODEL_NAME}",
+        f"--pretrained_vae_model_name_or_path={VAE_NAME}",
+        f"--resolution={RESOLUTION}",
+        f"--train_batch_size={config.get('train_batch_size', 1)}",
+        f"--gradient_accumulation_steps={config.get('gradient_accumulation_steps', 4)}",
+        f"--learning_rate={config['lr']}",
+        f"--lr_scheduler={config.get('lr_scheduler', 'cosine')}",
+        f"--lr_warmup_steps={min(config.get('lr_warmup_steps', 100), SCREEN_STEPS // 2)}",
+        f"--max_train_steps={SCREEN_STEPS}",
+        f"--checkpointing_steps={SCREEN_STEPS}",
+        f"--seed={SEED}",
+        f"--output_dir={output_dir}",
+        f"--rank={config.get('rank', 16)}",
+        "--mixed_precision=bf16",
+        "--gradient_checkpointing",
+        "--report_to=tensorboard",
+    ]
+
+    if dataset_name:
+        cmd.extend([f"--dataset_name={dataset_name}", "--caption_column=text"])
+    else:
+        cmd.extend([f"--train_data_dir={VOL_DIR}/autoresearch/train_data", "--caption_column=text"])
+
+    print(f"=== [{exp_tag}] SCREENING ({SCREEN_STEPS} steps) ===", flush=True)
+    print(f"Config: rank={config.get('rank')}, lr={config['lr']}")
+
+    # Capture output to parse loss values
+    losses = []
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    with process.stdout as pipe:
+        for line in iter(pipe.readline, b""):
+            text = line.decode()
+            print(text, end="")
+            # Parse step_loss from progress bar output
+            match = re.search(r"step_loss=([\d.e+-]+)", text)
+            if match:
+                losses.append(float(match.group(1)))
+
+    exit_code = process.wait()
+    training_seconds = time.time() - t_start
+
+    if exit_code != 0 or len(losses) < 5:
+        return {
+            "status": "crash",
+            "error": "screen_failed",
+            "training_seconds": training_seconds,
+            "exp_tag": exp_tag,
+            "config": config,
+        }
+
+    # Compute loss trajectory metrics
+    import numpy as np
+    losses_arr = np.array(losses)
+    first_half = losses_arr[: len(losses_arr) // 2]
+    second_half = losses_arr[len(losses_arr) // 2 :]
+
+    avg_loss = float(np.mean(losses_arr))
+    loss_slope = float(np.mean(second_half) - np.mean(first_half))  # negative = improving
+    final_loss = float(np.mean(losses_arr[-5:]))
+
+    print("---")
+    print(f"exp_tag:            {exp_tag}")
+    print(f"avg_loss:           {avg_loss:.6f}")
+    print(f"final_loss:         {final_loss:.6f}")
+    print(f"loss_slope:         {loss_slope:.6f}")
+    print(f"num_loss_samples:   {len(losses)}")
+    print(f"training_seconds:   {training_seconds:.1f}")
+    print("---")
+
+    return {
+        "status": "ok",
+        "exp_tag": exp_tag,
+        "config": config,
+        "avg_loss": avg_loss,
+        "final_loss": final_loss,
+        "loss_slope": loss_slope,
+        "num_loss_samples": len(losses),
+        "training_seconds": training_seconds,
+    }
 
 
 @app.function(
@@ -312,16 +423,84 @@ def load_eval_prompts(project_dir: Path) -> list[str]:
 
 
 @app.local_entrypoint()
-def main(dry_run: bool = False, batch: bool = False, dataset_name: str = ""):
+def main(dry_run: bool = False, batch: bool = False, screen: bool = False, dataset_name: str = ""):
     """Entry point.
 
-    Single mode: reads config.yaml, runs one experiment.
-    Batch mode:  reads batch.yaml, runs N experiments in parallel on separate GPUs.
+    Single mode:  reads config.yaml, runs one experiment.
+    Batch mode:   reads batch.yaml, runs N experiments in parallel on separate GPUs.
+    Screen mode:  reads batch.yaml, runs cheap 50-step screening on all configs in parallel.
+                  Reports loss trajectory only — no image generation, no CLIP scoring. ~5 min.
     """
     project_dir = Path(__file__).parent
     eval_prompts = load_eval_prompts(project_dir)
 
-    if batch:
+    if screen:
+        # --- SCREEN MODE: cheap 50-step loss-only screening ---
+        batch_path = project_dir / "batch.yaml"
+        if not batch_path.exists():
+            print("ERROR: batch.yaml not found for screening")
+            sys.exit(1)
+
+        batch_config = yaml.safe_load(batch_path.read_text())
+        base_config = yaml.safe_load((project_dir / "config.yaml").read_text())
+        experiments = batch_config.get("experiments", [])
+
+        configs = []
+        tags = []
+        for exp in experiments:
+            tag = exp.get("tag", f"screen_{len(configs)}")
+            merged = {**base_config, **{k: v for k, v in exp.items() if k != "tag"}}
+            configs.append(merged)
+            tags.append(tag)
+
+        if dry_run:
+            print(f"DRY RUN — screening {len(configs)} configs ({SCREEN_STEPS} steps each):\n")
+            for tag, config in zip(tags, configs):
+                print(f"  [{tag}] rank={config.get('rank')}, lr={config.get('lr')}")
+            sys.exit(0)
+
+        print(f"Screening {len(configs)} configs ({SCREEN_STEPS} steps each, parallel)...\n")
+
+        results = list(screen_experiment.map(
+            configs,
+            tags,
+            [dataset_name] * len(configs),
+        ))
+
+        # --- SCREEN RESULTS ---
+        print(f"\n{'='*70}")
+        print(f"SCREEN RESULTS — {len(results)} configs ({SCREEN_STEPS} steps each)")
+        print(f"{'='*70}\n")
+
+        ok_results = []
+        for r in results:
+            tag = r.get("exp_tag", "?")
+            if r["status"] == "ok":
+                ok_results.append(r)
+                cfg = r.get("config", {})
+                print(f"  [{tag}] final_loss={r['final_loss']:.4f}  slope={r['loss_slope']:.4f}  "
+                      f"rank={cfg.get('rank')}  lr={cfg.get('lr')}  "
+                      f"time={r['training_seconds']:.0f}s")
+            else:
+                print(f"  [{tag}] FAILED: {r.get('error', 'unknown')}")
+
+        if ok_results:
+            # Best = lowest final loss (most negative slope is also good)
+            best = min(ok_results, key=lambda r: r["final_loss"])
+            worst = max(ok_results, key=lambda r: r["final_loss"])
+            print(f"\n{'─'*70}")
+            print(f"BEST:  [{best['exp_tag']}] final_loss={best['final_loss']:.4f}  slope={best['loss_slope']:.4f}")
+            print(f"WORST: [{worst['exp_tag']}] final_loss={worst['final_loss']:.4f}  slope={worst['loss_slope']:.4f}")
+            print(f"{'─'*70}")
+
+            # Rank all by final_loss for the LLM to parse
+            ranked = sorted(ok_results, key=lambda r: r["final_loss"])
+            print(f"\nscreen_ranking:")
+            for i, r in enumerate(ranked):
+                cfg = r.get("config", {})
+                print(f"  {i+1}. [{r['exp_tag']}] final_loss={r['final_loss']:.4f} config={json.dumps({k: cfg[k] for k in ['rank', 'lr', 'max_train_steps'] if k in cfg})}")
+
+    elif batch:
         # --- BATCH MODE: parallel experiments ---
         batch_path = project_dir / "batch.yaml"
         if not batch_path.exists():
