@@ -215,10 +215,13 @@ def run_experiment(config: dict, eval_prompts: list[str], exp_tag: str = "curren
     from diffusers import DiffusionPipeline
 
     from score import (
-        aggregate_scores,
+        aggregate_multi_scores,
         embed_image,
+        hpsv2_score,
+        pickscore,
         score_against_centroid,
         score_nearest_neighbor,
+        vlm_judge,
     )
 
     output_dir = f"{VOL_DIR}/autoresearch/runs/{exp_tag}"
@@ -343,8 +346,8 @@ def run_experiment(config: dict, eval_prompts: list[str], exp_tag: str = "curren
     del pipe
     torch.cuda.empty_cache()
 
-    # --- CLIP SCORING ---
-    print(f"\n=== [{exp_tag}] CLIP SCORING ===", flush=True)
+    # --- MULTI-METRIC SCORING ---
+    print(f"\n=== [{exp_tag}] SCORING (CLIP + PickScore + HPSv2) ===", flush=True)
 
     centroid_path = f"{ref_dir}/ref_centroid.npy"
     embeddings_path = f"{ref_dir}/ref_embeddings.npy"
@@ -358,24 +361,60 @@ def run_experiment(config: dict, eval_prompts: list[str], exp_tag: str = "curren
     trigger_centroid_sims = []
     trigger_nn_sims = []
     neg_sims = []
+    trigger_pickscores = []
+    trigger_hpsv2 = []
+    trigger_vlm = []
 
     for pi, seed, img_path in image_paths:
-        emb = embed_image(Path(img_path))
+        img_p = Path(img_path)
+        prompt = prompts[pi]
+
+        # CLIP scoring
+        emb = embed_image(img_p)
         c_sim = score_against_centroid(emb, centroid)
         nn_sim = score_nearest_neighbor(emb, ref_embeddings)
 
         if pi < NUM_TRIGGER_PROMPTS:
             trigger_centroid_sims.append(c_sim)
             trigger_nn_sims.append(nn_sim)
+
+            # PickScore + HPSv2 (only for trigger images, not negative control)
+            try:
+                ps = pickscore(img_p, prompt)
+                trigger_pickscores.append(ps)
+            except Exception as e:
+                print(f"  PickScore failed: {e}")
+                trigger_pickscores.append(0.0)
+
+            try:
+                hs = hpsv2_score(img_p, prompt)
+                trigger_hpsv2.append(hs)
+            except Exception as e:
+                print(f"  HPSv2 failed: {e}")
+                trigger_hpsv2.append(0.0)
+
+            # VLM judge (only if API key available, sample 1 per prompt to control cost)
+            if seed == EVAL_SEEDS[0]:
+                vj = vlm_judge(img_p)
+                if vj["vlm_avg"] > 0:
+                    trigger_vlm.append(vj["vlm_avg"])
         else:
             neg_sims.append(c_sim)
+
+        print(f"  [{pi}:{seed}] clip={c_sim:.3f}", end="")
+        if pi < NUM_TRIGGER_PROMPTS:
+            print(f"  pick={trigger_pickscores[-1]:.3f}  hps={trigger_hpsv2[-1]:.3f}", end="")
+        print()
 
     if not trigger_centroid_sims:
         return {"status": "crash", "error": "no_scores", "exp_tag": exp_tag, "config": config}
 
-    scores = aggregate_scores(
+    scores = aggregate_multi_scores(
         trigger_centroid_sims, trigger_nn_sims,
         neg_sims if neg_sims else [0.0],
+        trigger_pickscores,
+        trigger_hpsv2,
+        trigger_vlm,
         num_prompts=NUM_TRIGGER_PROMPTS,
         seeds_per_prompt=len(EVAL_SEEDS),
     )
@@ -386,8 +425,12 @@ def run_experiment(config: dict, eval_prompts: list[str], exp_tag: str = "curren
     prompt_scores_str = ", ".join(f"{s:.2f}" for s in scores["prompt_scores"])
     print("---")
     print(f"exp_tag:            {exp_tag}")
+    print(f"composite_score:    {scores['composite_score']:.6f}")
     print(f"clip_sim_centroid:  {scores['clip_sim_centroid']:.6f}")
     print(f"clip_sim_nn:        {scores['clip_sim_nn']:.6f}")
+    print(f"pickscore_avg:      {scores['pickscore_avg']:.6f}")
+    print(f"hpsv2_avg:          {scores['hpsv2_avg']:.6f}")
+    print(f"vlm_avg:            {scores['vlm_avg']:.6f}")
     print(f"prompt_scores:      {prompt_scores_str}")
     print(f"score_stddev:       {scores['score_stddev']:.6f}")
     print(f"neg_control:        {scores['neg_control']:.6f}")
@@ -399,10 +442,6 @@ def run_experiment(config: dict, eval_prompts: list[str], exp_tag: str = "curren
 
     if scores["neg_control"] > NEG_WARN_THRESHOLD:
         print(f"WARNING: neg_control ({scores['neg_control']:.3f}) > {NEG_WARN_THRESHOLD} — possible overfitting")
-
-    # Note: volume.commit() is NOT called here. When running parallel experiments
-    # via .map(), concurrent commits can overwrite each other's snapshots.
-    # Modal auto-persists writes to the volume when the function completes.
 
     return {
         "status": "ok",
@@ -559,24 +598,39 @@ def main(dry_run: bool = False, batch: bool = False, screen: bool = False, datas
             if r["status"] == "ok":
                 ok_results.append(r)
                 cfg = r.get("config", {})
-                print(f"  [{tag}] clip_centroid={r['clip_sim_centroid']:.4f}  nn={r['clip_sim_nn']:.4f}  neg={r['neg_control']:.4f}  "
-                      f"rank={cfg.get('rank')}  lr={cfg.get('lr')}  steps={cfg.get('max_train_steps')}  "
+                print(f"  [{tag}] composite={r['composite_score']:.4f}  clip={r['clip_sim_centroid']:.4f}  "
+                      f"pick={r['pickscore_avg']:.4f}  hps={r['hpsv2_avg']:.4f}  vlm={r['vlm_avg']:.4f}  "
+                      f"neg={r['neg_control']:.4f}  rank={cfg.get('rank')}  lr={cfg.get('lr')}  "
                       f"train={r['training_seconds']:.0f}s")
             else:
                 print(f"  [{tag}] FAILED: {r.get('error', 'unknown')}")
 
         if ok_results:
-            best = max(ok_results, key=lambda r: r["clip_sim_centroid"])
-            print(f"\n{'─'*70}")
-            print(f"BEST: [{best['exp_tag']}] clip_sim_centroid={best['clip_sim_centroid']:.6f}")
-            cfg = best.get("config", {})
-            print(f"  rank={cfg.get('rank')}, lr={cfg.get('lr')}, steps={cfg.get('max_train_steps')}")
-            print(f"{'─'*70}")
+            # Rank by composite score, keep top 3
+            ranked = sorted(ok_results, key=lambda r: r["composite_score"], reverse=True)
+            top_n = min(3, len(ranked))
 
-            # Output JSON for LLM to parse
+            print(f"\n{'─'*70}")
+            print(f"TOP {top_n} (ranked by composite score):")
+            print(f"{'─'*70}")
+            for i, r in enumerate(ranked[:top_n]):
+                cfg = r.get("config", {})
+                print(f"  #{i+1} [{r['exp_tag']}] composite={r['composite_score']:.4f}  "
+                      f"clip={r['clip_sim_centroid']:.4f}  pick={r['pickscore_avg']:.4f}  "
+                      f"hps={r['hpsv2_avg']:.4f}  rank={cfg.get('rank')}  lr={cfg.get('lr')}")
+
+            best = ranked[0]
+            cfg = best.get("config", {})
             print(f"\nbest_tag: {best['exp_tag']}")
+            print(f"best_composite: {best['composite_score']:.6f}")
             print(f"best_clip_centroid: {best['clip_sim_centroid']:.6f}")
+            print(f"best_pickscore: {best['pickscore_avg']:.6f}")
+            print(f"best_hpsv2: {best['hpsv2_avg']:.6f}")
             print(f"best_config: {json.dumps(cfg)}")
+
+            if top_n >= 2:
+                print(f"runner_up_tag: {ranked[1]['exp_tag']}")
+                print(f"runner_up_composite: {ranked[1]['composite_score']:.6f}")
 
     else:
         # --- SINGLE MODE: one experiment ---
