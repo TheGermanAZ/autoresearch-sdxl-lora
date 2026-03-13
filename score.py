@@ -214,7 +214,7 @@ def vlm_judge(image_path: Path, api_key: str = None) -> dict:
     media_type = "image/png" if suffix.endswith(".png") else "image/jpeg"
 
     payload = json.dumps({
-        "model": "google/gemini-pro-1.5",
+        "model": "google/gemini-3-pro",
         "max_tokens": 50,
         "messages": [{
             "role": "user",
