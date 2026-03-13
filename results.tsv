@@ -1,9 +1,1 @@
-exp_id	rank	alpha	lr	steps	val_loss	fid	clip_score	vram_gb	status	notes
-001	8	8	1e-4	1000	-	-	-	-	pending	rank=8 baseline
-002	8	8	5e-5	1000	-	-	-	-	pending	rank=8 lower lr
-003	16	16	1e-4	1000	-	-	-	-	pending	rank=16 baseline
-004	16	16	5e-5	1000	-	-	-	-	pending	rank=16 lower lr
-005	32	32	1e-4	1000	-	-	-	-	pending	rank=32 baseline
-006	32	32	5e-5	1000	-	-	-	-	pending	rank=32 lower lr
-007	64	64	1e-4	1000	-	-	-	-	pending	rank=64 baseline
-008	64	64	5e-5	1000	-	-	-	-	pending	rank=64 lower lr
+commit	composite	clip_centroid	pickscore	hpsv2	vlm	neg_ctrl	vram_gb	train_sec	status	description

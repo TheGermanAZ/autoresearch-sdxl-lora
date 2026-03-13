@@ -48,7 +48,7 @@ image = (
     )
     .env({"HF_HUB_CACHE": "/cache", "HF_XET_HIGH_PERFORMANCE": "1"})
     .run_commands(
-        "git clone --depth 1 https://github.com/huggingface/diffusers.git /diffusers_repo"
+        "git clone --depth 1 --branch v0.31.0 https://github.com/huggingface/diffusers.git /diffusers_repo"
     )
 )
 
@@ -86,10 +86,10 @@ BASE_CONFIG = {
 }
 
 VALIDATION_PROMPTS = [
-    "a photo of a cat sitting on a windowsill at sunset",
-    "an oil painting of a mountain landscape in autumn",
-    "a digital illustration of a robot reading a book",
-    "a watercolor portrait of an elderly woman smiling",
+    "a renaissance oil portrait of a woman with glowing cybernetic implants, chiaroscuro lighting with neon accents",
+    "a baroque still life of fruit and flowers with holographic elements and circuit board textures",
+    "a classical painting of a cathedral interior lit by bioluminescent panels and floating data streams",
+    "a Caravaggio-style portrait of a knight in chrome armor with a glowing visor, dramatic shadows",
 ]
 
 

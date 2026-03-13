@@ -1,0 +1,17 @@
+[project]
+name = "sdxl-lora-modal"
+version = "0.1.0"
+description = "Autonomous parallel SDXL LoRA training on Modal with CLIP scoring"
+requires-python = ">=3.9"
+dependencies = [
+    "modal>=0.66",
+    "pillow>=10.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+download = ["gallery-dl>=1.27"]
+dev = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
