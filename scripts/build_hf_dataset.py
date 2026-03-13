@@ -85,7 +85,7 @@ def caption_batch(image_bytes_list: list[bytes]) -> list[str]:
     timeout=10 * 60,
     secrets=[modal.Secret.from_name("huggingface-secret")],
 )
-def push_to_hub(image_bytes_list: list[bytes], captions: list[str], filenames: list[str], repo_id: str):
+def push_to_hub(image_bytes_list: list[bytes], captions: list[str], repo_id: str):
     """Create a HuggingFace dataset and push it."""
     import io
     from datasets import Dataset, Features, Value, Image as HFImage
@@ -189,7 +189,7 @@ def main(
     print(f"\nPushing dataset to {repo_id}...")
     all_bytes = [f.read_bytes() for f in image_files]
     filenames = [f.name for f in image_files]
-    push_to_hub.remote(all_bytes, captions, filenames, repo_id)
+    push_to_hub.remote(all_bytes, captions, repo_id)
 
     print(f"\nDone! Use in training:")
     print(f"  modal run modal_train.py --exp-id 003 --dataset-name {repo_id}")
