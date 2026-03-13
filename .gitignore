@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Outputs (large model weights)
+outputs/
+
+# Data (training images)
+data/
+
+# OS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
