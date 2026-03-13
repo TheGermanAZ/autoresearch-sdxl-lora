@@ -10,7 +10,6 @@ Usage:
     modal run prepare.py --images data/cyber-renaissance --dataset-name your-user/cyber-renaissance
 """
 import os
-import shutil
 import sys
 from pathlib import Path
 

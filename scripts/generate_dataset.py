@@ -189,7 +189,8 @@ def generate_batch(prompts: list[str], start_idx: int, output_dir: str, negative
 
         print(f"[{idx:04d}] saved — seed={seed}")
 
-    volume.commit()
+    # Note: no volume.commit() here — runs via .map() and concurrent commits
+    # can overwrite each other's snapshots. Modal auto-persists writes.
     return len(prompts)
 
 

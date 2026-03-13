@@ -269,7 +269,7 @@ def run_experiment(config: dict, eval_prompts: list[str], exp_tag: str = "curren
         seeds_per_prompt=len(EVAL_SEEDS),
     )
 
-    peak_mb = torch.cuda.max_memory_allocated() / (1024 * 1024)
+    peak_gb = torch.cuda.max_memory_allocated() / (1024 ** 3)
 
     # --- OUTPUT ---
     prompt_scores_str = ", ".join(f"{s:.2f}" for s in scores["prompt_scores"])
@@ -280,7 +280,7 @@ def run_experiment(config: dict, eval_prompts: list[str], exp_tag: str = "curren
     print(f"prompt_scores:      {prompt_scores_str}")
     print(f"score_stddev:       {scores['score_stddev']:.6f}")
     print(f"neg_control:        {scores['neg_control']:.6f}")
-    print(f"peak_vram_mb:       {peak_mb:.1f}")
+    print(f"peak_vram_gb:       {peak_gb:.1f}")
     print(f"training_seconds:   {training_seconds:.1f}")
     print(f"steps_completed:    {config.get('max_train_steps', 0)}")
     print(f"eval_seconds:       {eval_seconds:.1f}")
@@ -298,7 +298,7 @@ def run_experiment(config: dict, eval_prompts: list[str], exp_tag: str = "curren
         "exp_tag": exp_tag,
         "config": config,
         **scores,
-        "peak_vram_mb": peak_mb,
+        "peak_vram_gb": peak_gb,
         "training_seconds": training_seconds,
         "eval_seconds": eval_seconds,
         "steps_completed": config.get("max_train_steps", 0),
