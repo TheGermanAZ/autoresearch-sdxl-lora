@@ -148,7 +148,7 @@ def load_hpsv2():
         import torch
         from transformers import CLIPModel, CLIPProcessor
 
-        model_id = "adams-story/HPSv2"
+        model_id = "adams-story/HPSv2-hf"
         _hps_processor = CLIPProcessor.from_pretrained(model_id)
         _hps_model = CLIPModel.from_pretrained(model_id).to(
             "cuda" if torch.cuda.is_available() else "cpu"
@@ -214,7 +214,7 @@ def vlm_judge(image_path: Path, api_key: str = None) -> dict:
     media_type = "image/png" if suffix.endswith(".png") else "image/jpeg"
 
     payload = json.dumps({
-        "model": "google/gemini-3-pro",
+        "model": "google/gemini-2.5-pro-preview",
         "max_tokens": 50,
         "messages": [{
             "role": "user",

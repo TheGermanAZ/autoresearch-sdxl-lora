@@ -137,6 +137,7 @@ def materialize_training_data(train_data_dir: str, config: dict, dataset_name: s
                 f"Training data directory not found: {source_dir}. Run 'modal run prepare.py --images <dir>' first."
             )
 
+        # Copy images into per-experiment dir (parallel-safe, each experiment gets its own copy)
         for src_path in sorted(source_dir.iterdir()):
             if (
                 not src_path.is_file()
@@ -144,7 +145,9 @@ def materialize_training_data(train_data_dir: str, config: dict, dataset_name: s
                 or src_path.suffix.lower() not in SUPPORTED_IMAGE_SUFFIXES
             ):
                 continue
-            os.symlink(src_path, target_dir / src_path.name)
+            dest = target_dir / src_path.name
+            if not dest.exists():
+                shutil.copy2(src_path, dest)
             image_filenames.append(src_path.name)
 
     if not image_filenames:
@@ -305,7 +308,7 @@ def screen_experiment(config: dict, exp_tag: str = "screen", dataset_name: str =
 @app.function(
     gpu="A100-80GB",
     volumes={VOL_DIR: volume},
-    timeout=60 * MINUTES,
+    timeout=50 * MINUTES,
     secrets=[
         modal.Secret.from_name("huggingface-secret"),
         modal.Secret.from_name("openrouter-secret", required_keys=["OPENROUTER_API_KEY"]),
