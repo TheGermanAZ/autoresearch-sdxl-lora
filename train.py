@@ -311,7 +311,7 @@ def screen_experiment(config: dict, exp_tag: str = "screen", dataset_name: str =
     timeout=50 * MINUTES,
     secrets=[
         modal.Secret.from_name("huggingface-secret"),
-        modal.Secret.from_name("openrouter-secret", required_keys=["OPENROUTER_API_KEY"]),
+        modal.Secret.from_name("openrouter-secret"),
     ],
 )
 def run_experiment(config: dict, eval_prompts: list[str], exp_tag: str = "current", dataset_name: str = ""):

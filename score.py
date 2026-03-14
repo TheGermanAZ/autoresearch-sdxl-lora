@@ -128,7 +128,8 @@ def pickscore(image_path: Path, prompt: str) -> float:
             attention_mask=inputs["attention_mask"],
         )
         text_emb = text_emb / text_emb.norm(dim=-1, keepdim=True)
-        score = (image_emb * text_emb).sum(dim=-1).item()
+        # logit_scale is a learned temperature (~100). Without it we'd just get cosine similarity.
+        score = (model.logit_scale.exp() * (image_emb * text_emb).sum(dim=-1)).item()
 
     return score
 
@@ -173,7 +174,10 @@ def hpsv2_score(image_path: Path, prompt: str) -> float:
 
     with torch.no_grad():
         outputs = model(**inputs)
-        score = outputs.logits_per_image.item() / 100.0  # normalize
+        # logits_per_image already includes logit_scale internally.
+        # Divide by the actual learned scale to get cosine similarity (~0.2-0.3 range).
+        logit_scale = model.logit_scale.exp().item()
+        score = outputs.logits_per_image.item() / logit_scale if logit_scale > 0 else 0.0
 
     return score
 
@@ -238,11 +242,12 @@ def vlm_judge(image_path: Path, api_key: str = None) -> dict:
         with urlopen(req, timeout=60) as resp:
             result = json.loads(resp.read())
         text = result["choices"][0]["message"]["content"].strip()
-        nums = re.findall(r"(\d+)", text)
-        if len(nums) >= 3:
-            style = float(nums[0]) / 10.0
-            technical = float(nums[1]) / 10.0
-            aesthetic = float(nums[2]) / 10.0
+        # Match exactly 3 comma-separated numbers to avoid stray digits in preamble
+        match = re.search(r"(\d+)\s*,\s*(\d+)\s*,\s*(\d+)", text)
+        if match:
+            style = min(float(match.group(1)), 10.0) / 10.0
+            technical = min(float(match.group(2)), 10.0) / 10.0
+            aesthetic = min(float(match.group(3)), 10.0) / 10.0
             return {
                 "style_fusion": style,
                 "technical": technical,
@@ -304,10 +309,10 @@ def aggregate_multi_scores(
 
     # Normalize scores to roughly [0, 1] for fair weighting
     # CLIP centroid is already ~[0, 1]
-    # PickScore is typically ~[0.15, 0.30], scale to [0, 1]
-    pick_norm = min(max((pick_avg - 0.15) / 0.15, 0), 1)
-    # HPSv2 is typically ~[0.20, 0.35], scale to [0, 1]
-    hps_norm = min(max((hps_avg - 0.20) / 0.15, 0), 1)
+    # PickScore with logit_scale is typically ~[18, 25], scale to [0, 1]
+    pick_norm = min(max((pick_avg - 18.0) / 7.0, 0), 1)
+    # HPSv2 cosine similarity is typically ~[0.20, 0.32], scale to [0, 1]
+    hps_norm = min(max((hps_avg - 0.20) / 0.12, 0), 1)
 
     if has_vlm:
         composite = (
